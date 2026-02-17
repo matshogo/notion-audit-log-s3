@@ -366,7 +366,7 @@ aws logs tail /aws/lambda/notion-webhook-handler --follow
 
 **対処法**:
 1. Athena → Settings → Manage
-2. Query result location: `s3://aws-athena-query-results-491767864459-ap-northeast-1/`
+2. Query result locationを設定
 3. Save
 
 ---
