@@ -1,0 +1,8 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "notion-audit-log-s3"
+region = "ap-northeast-1"  # 任意のリージョンに変更してください
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
