@@ -20,7 +20,7 @@ CREATE EXTERNAL TABLE notion_audit_logs.events_flat (
   raw_event string
 )
 ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
-LOCATION 's3://notion-audit-logs-491767864459/audit-logs/flat/';
+LOCATION 's3://notion-audit-logs-{YourAccountId}/audit-logs/flat/';
 
 -- ステップ3: データ確認
 SELECT * FROM notion_audit_logs.events_flat LIMIT 10;
