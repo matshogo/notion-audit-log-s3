@@ -1,139 +1,232 @@
-# Notion Audit Log to S3 完全セットアップガイド
+# セットアップガイド / Setup Guide
 
-NotionのWebhookを使ってAudit logをS3に保存し、Athena + QuickSightで可視化するシステムの構築手順です。
-
-## 目次
-1. [環境構築](#1-環境構築)
-2. [Notionの設定](#2-notionの設定)
-3. [Athenaのセットアップ](#3-athenaのセットアップ)
-4. [QuickSightのセットアップ](#4-quicksightのセットアップ)
-5. [トラブルシューティング](#5-トラブルシューティング)
+[日本語](#日本語) | [English](#english)
 
 ---
 
-## 1. 環境構築
+## 日本語
 
-### 1-1. Webhook Secretの生成
+### 目次
+
+1. [前提条件](#1-前提条件)
+2. [Notion側の準備](#2-notion側の準備)
+3. [AWSデプロイ](#3-awsデプロイ)
+4. [Notion Webhookの設定](#4-notion-webhookの設定)
+5. [S3→Notionインポート](#5-s3notionインポート)
+6. [Athenaのセットアップ（オプション）](#6-athenaのセットアップオプション)
+7. [トラブルシューティング](#7-トラブルシューティング)
+
+---
+
+### 1. 前提条件
+
+- AWS CLI 設定済み
+- AWS SAM CLI インストール済み
+- Python 3.9以上
+- Notion ワークスペースの管理者権限
+- Notion Enterprise プラン（Custom SIEM Integration利用時）
+
+---
+
+### 2. Notion側の準備
+
+#### 2-1. Internal Integrationの作成
+
+1. [Notion Integrations](https://www.notion.so/my-integrations) にアクセス
+2. 「New integration」をクリック
+3. 名前を入力（例: `Audit Log Dashboard`）
+4. 関連するワークスペースを選択
+5. 「Submit」をクリック
+6. 表示される「Internal Integration Secret」（`ntn_` で始まる文字列）を控える
+
+#### 2-2. Notionデータベースの作成
+
+Notionで新しいデータベース（フルページ）を作成し、以下のプロパティを設定してください：
+
+| プロパティ名 | 型 | 説明 |
+|---|---|---|
+| イベントID | タイトル | Audit LogのイベントID |
+| イベントタイプ | セレクト | イベントの種類（page.created等） |
+| ユーザー | メール | 操作を行ったユーザーのメール |
+| ワークスペース | テキスト | ワークスペース名 |
+| プラットフォーム | セレクト | 利用プラットフォーム |
+| IPアドレス | テキスト | アクセス元IPアドレス |
+| 日時 | 日付 | イベント発生日時 |
+
+#### 2-3. Integrationへのアクセス権付与
+
+1. 作成したデータベースページを開く
+2. 右上の「...」→「コネクト」→ 2-1で作成したIntegrationを選択
+3. 「確認」をクリック
+
+#### 2-4. データベースIDの取得
+
+データベースのURLからIDを取得します：
+
+```
+https://www.notion.so/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?v=yyyyyyyy
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                      この部分がデータベースID（32文字）
+```
+
+---
+
+### 3. AWSデプロイ
+
+#### 3-1. Webhook Secretの生成
 
 ```bash
 openssl rand -base64 32
 ```
 
-出力例: `abc123xyz789...`（ランダムな文字列）
+生成された文字列を安全に保管してください。
 
-**重要**: この値を安全に保管してください（後で使用します）
-
-### 1-2. SAMビルド
+#### 3-2. デプロイスクリプトを使う場合
 
 ```bash
-cd notion-audit-log-s3
+./deploy.sh
+```
+
+対話形式で各パラメータを入力します。
+
+#### 3-3. 手動でデプロイする場合
+
+```bash
 sam build
+
+sam deploy --stack-name notion-audit-log-s3 \
+  --region ap-northeast-1 \
+  --capabilities CAPABILITY_IAM \
+  --resolve-s3 \
+  --parameter-overrides \
+    WebhookSecret='生成したシークレット' \
+    NotionApiKey='ntn_xxxxx' \
+    NotionDatabaseId='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+    ImportLogLevel='all' \
+    NotificationType='none'
 ```
 
-### 1-3. デプロイ
+#### パラメータの説明
 
-```bash
-sam deploy --guided --parameter-overrides WebhookSecret=<1-1で生成したSecret>
-```
+- `ImportLogLevel`:
+  - `all` — 全てのAudit LogイベントをNotionデータベースに取り込む
+  - `page_publish_only` — ページ公開関連イベントのみ取り込む（`page.published`, `page.created`, `page.content_updated.published`）
 
-対話形式で以下を入力：
-- Stack Name: `notion-audit-log-s3`
-- AWS Region: `ap-northeast-1`（または任意のリージョン）
-- Confirm changes before deploy: `Y`
-- Allow SAM CLI IAM role creation: `Y`
-- Disable rollback: `Y`
-- NotionWebhookFunction has no authentication: `y`
-- Save arguments to configuration file: `Y`
+- `NotificationType`:
+  - `none` — 通知なし
+  - `email` — ページ公開時にメール通知（`NotificationEmail` の指定が必要）
+  - `slack` — ページ公開時にSlack通知（`SlackWebhookUrl` の指定が必要）
 
-### 1-4. デプロイ結果の確認
+#### 3-4. デプロイ結果の確認
 
-デプロイ完了後、以下の情報が表示されます：
+デプロイ完了後、以下が出力されます：
 
 ```
-Outputs:
-WebhookUrl: https://xxxxx.execute-api.{region}.amazonaws.com/prod/webhook
-BucketName: notion-audit-logs-{AccountId}
-FunctionName: notion-webhook-handler
+WebhookUrl:         https://xxxxx.execute-api.ap-northeast-1.amazonaws.com/prod/webhook
+BucketName:         notion-audit-logs-{AccountId}
+FunctionName:       notion-webhook-handler
+ImportFunctionName: notion-s3-to-notion-importer
 ```
 
-**WebhookUrl** を控えてください（Notionの設定で使用します）
+`WebhookUrl` を控えてください。
 
 ---
 
-## 2. Notionの設定
+### 4. Notion Webhookの設定
 
-### 2-1. Custom SIEM Integrationの設定
+> この機能はNotion Enterpriseプランで利用可能です。
 
-1. Notion Workspace Settings を開く
-2. **Integrations** → **Custom SIEM Integration** を選択
-3. 以下を設定：
+1. Notion Workspace Settings → Integrations → Custom SIEM Integration
+2. 以下を設定：
+   - Webhook URL: デプロイで取得したURL
+   - Webhook headers:
+     - Header name: `x-notion-webhook-secret`
+     - Header value: 生成したWebhookSecret
+3. 「Save」をクリック
 
-**Webhook URL**
-```
-https://xxxxx.execute-api.{region}.amazonaws.com/prod/webhook
-```
-（1-4でコピーしたWebhookUrlを貼り付け）
+#### 動作確認
 
-**Webhook headers**
-- Header name: `x-notion-webhook-secret`
-- Header value: （1-1で生成したSecretを貼り付け）
-
-4. **Save** をクリック
-
-### 2-2. 動作確認
-
-Notionで何かアクション（ページ作成、閲覧など）を実行後、S3にログが保存されているか確認：
+Notionで何かアクション（ページ作成など）を実行後：
 
 ```bash
-aws s3 ls s3://notion-audit-logs-{YourAccountId}/audit-logs/flat/ --recursive
+# S3にログが保存されているか確認
+aws s3 ls s3://notion-audit-logs-{AccountId}/audit-logs/flat/ --recursive
 ```
-
-出力例：
-```
-2026-02-10 18:42:32  1038  audit-logs/flat/2026/02/10/20260210_094231_301028.json
-```
-
-ファイルが表示されれば成功です。
 
 ---
 
-## 3. Athenaのセットアップ
+### 5. S3→Notionインポート
 
-### 3-1. クエリ結果保存用バケットの作成
+S3に既に保存されているAudit LogをNotionデータベースに一括インポートできます。
+重複排除機能があるため、同じイベントが二重に取り込まれることはありません。
+
+#### 手動実行
 
 ```bash
-# AccountIdとRegionを自分の環境に合わせて変更
-aws s3 mb s3://aws-athena-query-results-{YourAccountId}-{YourRegion}
+# 全件インポート
+aws lambda invoke --function-name notion-s3-to-notion-importer \
+  --payload '{}' --cli-binary-format raw-in-base64-out output.json
+
+# テスト（10件だけ）
+aws lambda invoke --function-name notion-s3-to-notion-importer \
+  --payload '{"limit": 10}' --cli-binary-format raw-in-base64-out output.json
+
+# 特定月のみ
+aws lambda invoke --function-name notion-s3-to-notion-importer \
+  --payload '{"prefix": "audit-logs/flat/2026/03/"}' --cli-binary-format raw-in-base64-out output.json
 ```
 
-例: `aws s3 mb s3://aws-athena-query-results-123456789012-ap-northeast-1`
+#### 定期実行の有効化
 
-### 3-2. Athenaコンソールでの設定
+template.yaml の `S3ToNotionImportFunction` の `Enabled` を `true` に変更して再デプロイすると、6時間ごとに自動実行されます。
 
-1. AWSコンソールで **Athena** を開く
-2. 初回の場合、**Settings** → **Manage** で以下を設定：
-   - Query result location: `s3://aws-athena-query-results-{YourAccountId}-{YourRegion}/`
-   - **Save** をクリック
+```yaml
+Events:
+  ScheduledImport:
+    Type: Schedule
+    Properties:
+      Schedule: rate(6 hours)
+      Enabled: true   # ← false から true に変更
+```
 
-### 3-3. データベースの作成
+#### ページ公開時の即時実行
 
-Athenaクエリエディタで以下を実行：
+ページ公開イベント（`page.published`, `page.created`, `page.content_updated.published`）を検知すると、Webhook Lambda がインポートLambdaを非同期で即時実行します。この動作はデフォルトで有効です。
+
+#### ローカルスクリプトでのインポート
+
+Lambda を使わずローカルから実行することもできます：
+
+```bash
+python3 import_s3_to_notion.py \
+  --bucket 'notion-audit-logs-{AccountId}' \
+  --notion-api-key 'ntn_xxxxx' \
+  --database-id 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+  --limit 10
+```
+
+---
+
+### 6. Athenaのセットアップ（オプション）
+
+S3上のデータをSQLでクエリしたい場合に設定します。
+
+#### 6-1. クエリ結果保存用バケットの作成
+
+```bash
+aws s3 mb s3://aws-athena-query-results-{AccountId}-{Region}
+```
+
+#### 6-2. Athenaコンソールでの設定
+
+1. AWSコンソールで Athena を開く
+2. Settings → Manage → Query result location に上記バケットを設定
+
+#### 6-3. データベースとテーブルの作成
 
 ```sql
 CREATE DATABASE IF NOT EXISTS notion_audit_logs;
 ```
-
-### 3-4. テーブルの作成
-
-**重要**: Athenaは一度に1つのSQL文しか実行できません。以下を順番に実行してください。
-
-#### ステップ1: 既存テーブルを削除（既に作成済みの場合）
-
-```sql
-DROP TABLE IF EXISTS notion_audit_logs.events_flat;
-```
-
-#### ステップ2: 平坦化されたデータ用のテーブルを作成
 
 ```sql
 CREATE EXTERNAL TABLE notion_audit_logs.events_flat (
@@ -150,311 +243,323 @@ CREATE EXTERNAL TABLE notion_audit_logs.events_flat (
   raw_event string
 )
 ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
-LOCATION 's3://notion-audit-logs-{YourAccountId}/audit-logs/flat/';
+LOCATION 's3://notion-audit-logs-{AccountId}/audit-logs/flat/';
 ```
 
-**注意**: `{YourAccountId}` を実際のAWSアカウントIDに置き換えてください。
+`{AccountId}` を実際のAWSアカウントIDに置き換えてください。
 
-### 3-5. 動作確認
+#### 6-4. 動作確認
 
 ```sql
--- データ件数を確認
 SELECT COUNT(*) FROM notion_audit_logs.events_flat;
-```
-
-データ件数が表示されればOK
-
-```sql
--- データの内容を確認
 SELECT * FROM notion_audit_logs.events_flat LIMIT 10;
 ```
 
-全てのフィールドにデータが入っていればOK
+---
+
+### 7. トラブルシューティング
+
+#### S3にログが保存されない
+
+- Webhook URLが正しいか確認
+- `x-notion-webhook-secret` ヘッダーの値がデプロイ時のSecretと一致するか確認
+- Lambda のログを確認: `aws logs tail /aws/lambda/notion-webhook-handler --follow`
+
+#### Notionデータベースに書き込まれない
+
+- `NotionApiKey` と `NotionDatabaseId` が正しく設定されているか確認
+- IntegrationにデータベースへのアクセスPermissionが付与されているか確認
+- インポートLambdaのログを確認: `aws logs tail /aws/lambda/notion-s3-to-notion-importer --follow`
+
+#### 重複データが入ってしまった
+
+- インポートLambdaは実行時にNotionデータベースの既存イベントIDを取得して重複排除します
+- Webhook Lambda のリアルタイム書き込みとインポートLambdaが同時に動くと稀に重複する可能性があります
+- Notionデータベース上でイベントIDでソートし、手動で重複を削除してください
+
+#### 通知が届かない
+
+- `NotificationType` が正しく設定されているか確認
+- Email の場合: SNSサブスクリプションの確認メールを承認したか確認
+- Slack の場合: Incoming Webhook URLが有効か確認
+
+---
+---
+
+## English
+
+### Table of Contents
+
+1. [Prerequisites](#1-prerequisites)
+2. [Notion Preparation](#2-notion-preparation)
+3. [AWS Deployment](#3-aws-deployment)
+4. [Notion Webhook Configuration](#4-notion-webhook-configuration)
+5. [S3 → Notion Import](#5-s3--notion-import)
+6. [Athena Setup (Optional)](#6-athena-setup-optional)
+7. [Troubleshooting](#7-troubleshooting-1)
 
 ---
 
-## 4. QuickSightのセットアップ
+### 1. Prerequisites
 
-### 4-1. QuickSightの有効化
-
-1. AWSコンソールで **QuickSight** を開く
-2. 初回の場合、Sign up for QuickSight
-3. Edition: **Enterprise** 推奨（Standard Editionでも可）
-4. アカウント名とメールアドレスを入力
-5. Finish
-
-### 4-2. S3アクセス権限の付与
-
-1. QuickSight → 右上のアカウント名 → **Manage QuickSight**
-2. **Security & permissions** → **QuickSight access to AWS services**
-3. **Add or remove** をクリック
-4. **Amazon S3** にチェック
-5. **Select S3 buckets** をクリック
-6. 以下のバケットにチェック：
-   - `notion-audit-logs-{YourAccountId}`
-   - `aws-athena-query-results-{YourAccountId}-{YourRegion}`
-7. **Finish** → **Update**
-
-### 4-3. データソースの作成
-
-1. QuickSight ホーム → **Datasets** → **New dataset**
-2. データソース: **Athena** を選択
-3. データソース名: `notion-audit-logs`
-4. Athena workgroup: `primary`
-5. **Create data source**
-
-### 4-4. データセットの作成
-
-1. Database: `notion_audit_logs` を選択
-2. Tables: **`events_flat`** を選択（重要: eventsではなくevents_flat）
-3. **Select** をクリック
-4. データ取り込み方法を選択：
-   - **Import to SPICE**: 高速、推奨（データ更新が必要）
-   - **Directly query your data**: リアルタイム（遅い）
-5. **Visualize** をクリック
-
-### 4-5. データの確認
-
-分析画面が開いたら、左側のフィールドリストに以下が表示されます：
-- event_id
-- event_timestamp
-- event_type
-- user_email
-- platform
-- ip_address
-- workspace_name
-- actor_id
-- actor_type
-- raw_event
-
-これらのフィールドを使ってビジュアルを作成できます。
-
-### 4-6. ダッシュボードの作成
-
-1. **Create analysis** をクリック
-2. 以下のビジュアルを追加：
-
-**推奨ビジュアル**:
-- イベント数の推移（折れ線グラフ）
-- イベントタイプ別分布（円グラフ）
-- ユーザー別アクティビティ（横棒グラフ）
-- プラットフォーム別利用状況（縦棒グラフ）
-
-3. 完成したら **Share** → **Publish dashboard**
-4. ダッシュボード名を入力（例: `Notion Audit Log Dashboard`）
-5. **Publish dashboard** をクリック
-
-### 4-7. 自動更新の設定（SPICEの場合）
-
-1. **Datasets** → `notion-audit-logs` → **Refresh**
-2. **Schedule refresh** をクリック
-3. 頻度を設定（例: 毎日午前9時）
-4. **Save**
+- AWS CLI configured
+- AWS SAM CLI installed
+- Python 3.9 or later
+- Notion workspace admin access
+- Notion Enterprise plan (for Custom SIEM Integration)
 
 ---
 
-## 5. Notionへの埋め込み
+### 2. Notion Preparation
 
-QuickSightのダッシュボードをNotionページに埋め込むことができます。
+#### 2-1. Create an Internal Integration
 
-### 5-1. ダッシュボードの公開設定
+1. Go to [Notion Integrations](https://www.notion.so/my-integrations)
+2. Click "New integration"
+3. Enter a name (e.g., `Audit Log Dashboard`)
+4. Select the associated workspace
+5. Click "Submit"
+6. Copy the "Internal Integration Secret" (starts with `ntn_`)
 
-1. QuickSight → **Dashboards** → 作成したダッシュボードを開く
-2. 右上の **Share** → **Share dashboard** をクリック
-3. **Manage dashboard access** セクションで：
-   - **Public access** を有効化
-   - または特定のユーザー/グループに共有
+#### 2-2. Create a Notion Database
 
-### 5-2. 埋め込みURLの取得
+Create a new full-page database in Notion with the following properties:
 
-#### オプションA: 公開ダッシュボード（推奨）
+| Property Name | Type | Description |
+|---|---|---|
+| イベントID | Title | Audit Log event ID |
+| イベントタイプ | Select | Event type (e.g., page.created) |
+| ユーザー | Email | Email of the user who performed the action |
+| ワークスペース | Text | Workspace name |
+| プラットフォーム | Select | Platform used |
+| IPアドレス | Text | Source IP address |
+| 日時 | Date | Event timestamp |
 
-1. ダッシュボード画面右上の **Share** をクリック
-2. **Get embed code** を選択
-3. 表示されたURLをコピー
+#### 2-3. Grant Integration Access
 
-#### オプションB: 埋め込みコンソールを使用
+1. Open the database page
+2. Click "..." → "Connections" → Select the integration created in 2-1
+3. Click "Confirm"
 
-1. QuickSight → 左メニュー → **Manage QuickSight**
-2. **Domains and embedding** を選択
-3. 埋め込みを許可するドメインを追加（例: `notion.so`）
-4. ダッシュボードの埋め込みURLを取得
+#### 2-4. Get the Database ID
 
-### 5-3. Notionページへの埋め込み
+Extract the ID from the database URL:
 
-1. Notionページを開く
-2. `/embed` と入力してEmbedブロックを作成
-3. 取得したQuickSightのURLを貼り付け
-4. **Embed link** をクリック
-
-**注意**: 
-- QuickSightの公開設定によっては、Notionで表示できない場合があります
-- Enterprise Editionの場合、埋め込み機能がより柔軟に使えます
-
-### 5-4. 代替案: スクリーンショットの自動更新
-
-QuickSightの埋め込みが難しい場合、以下の方法も検討できます：
-
-1. QuickSightでダッシュボードのスクリーンショットを定期的に取得
-2. S3に保存
-3. NotionのImage URLとして参照
-
-または
-
-1. QuickSightのダッシュボードへのリンクをNotionに貼り付け
-2. Notionのリンクプレビュー機能で表示
-
----
-
-## 6. トラブルシューティング
-
-### 問題1: Notionからログが送信されない
-
-**症状**: S3にファイルが作成されない
-
-**確認事項**:
-1. Webhook URLが正しいか確認
-2. Webhook headerの名前が `x-notion-webhook-secret` か確認
-3. Webhook headerの値がデプロイ時のSecretと一致するか確認
-
-**確認方法**:
-```bash
-# Lambda関数のログを確認
-aws logs tail /aws/lambda/notion-webhook-handler --follow
+```
+https://www.notion.so/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx?v=yyyyyyyy
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                      This part is the database ID (32 characters)
 ```
 
-**対処法**:
-- Notionの設定を再確認
-- Lambda関数の環境変数 `WEBHOOK_SECRET` を確認
-
 ---
 
-### 問題2: QuickSightでデータが全てnull
+### 3. AWS Deployment
 
-**症状**: データは取り込めているが全てnull
+#### 3-1. Generate a Webhook Secret
 
-**原因**: テーブル定義とJSONの構造が合っていない
-
-**対処法**:
-1. 3-4の手順で `events_flat` テーブルを使用していることを確認
-2. QuickSightでデータセットを削除して再作成
-3. テーブル選択時に `events_flat` を選択
-
----
-
-### 問題3: QuickSightで「このテーブルを準備できません」エラー
-
-**症状**: データセット作成時にエラー
-
-**原因A**: QuickSightにS3アクセス権限がない
-
-**対処法**:
-1. QuickSight → Manage QuickSight → Security & permissions
-2. QuickSight access to AWS services → Add or remove
-3. Amazon S3 → Select S3 buckets
-4. 必要なバケットにチェック
-5. Update
-
-**原因B**: Athenaでクエリが失敗している
-
-**対処法**:
-1. Athenaコンソールで直接クエリを実行
-2. エラーメッセージを確認
-3. テーブル定義を修正
-
-**原因C**: Athenaのクエリ結果の場所が未設定
-
-**対処法**:
-1. Athena → Settings → Manage
-2. Query result locationを設定
-3. Save
-
----
-
-### 問題4: Lambda関数が401エラーを返す
-
-**症状**: Notionからのリクエストが拒否される
-
-**原因**: Webhook Secretが一致していない
-
-**確認方法**:
 ```bash
-# Lambda関数の環境変数を確認
-aws lambda get-function-configuration --function-name notion-webhook-handler --query 'Environment.Variables.WEBHOOK_SECRET'
+openssl rand -base64 32
 ```
 
-**対処法**:
-1. Notionの設定でヘッダー値を確認
-2. Lambda関数の環境変数と一致させる
-3. 必要に応じて再デプロイ
+Store the generated string securely.
+
+#### 3-2. Using the Deploy Script
+
+```bash
+./deploy.sh
+```
+
+You will be prompted to enter each parameter interactively.
+
+#### 3-3. Manual Deployment
+
+```bash
+sam build
+
+sam deploy --stack-name notion-audit-log-s3 \
+  --region ap-northeast-1 \
+  --capabilities CAPABILITY_IAM \
+  --resolve-s3 \
+  --parameter-overrides \
+    WebhookSecret='your-generated-secret' \
+    NotionApiKey='ntn_xxxxx' \
+    NotionDatabaseId='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+    ImportLogLevel='all' \
+    NotificationType='none'
+```
+
+#### Parameter Details
+
+- `ImportLogLevel`:
+  - `all` — Import all Audit Log events to the Notion database
+  - `page_publish_only` — Import only page publish events (`page.published`, `page.created`, `page.content_updated.published`)
+
+- `NotificationType`:
+  - `none` — No notifications
+  - `email` — Email notification on page publish (`NotificationEmail` required)
+  - `slack` — Slack notification on page publish (`SlackWebhookUrl` required)
+
+#### 3-4. Verify Deployment
+
+After deployment, the following outputs are displayed:
+
+```
+WebhookUrl:         https://xxxxx.execute-api.ap-northeast-1.amazonaws.com/prod/webhook
+BucketName:         notion-audit-logs-{AccountId}
+FunctionName:       notion-webhook-handler
+ImportFunctionName: notion-s3-to-notion-importer
+```
+
+Note the `WebhookUrl` for the next step.
 
 ---
 
+### 4. Notion Webhook Configuration
 
+> This feature is available on the Notion Enterprise plan.
 
----
+1. Go to Notion Workspace Settings → Integrations → Custom SIEM Integration
+2. Configure:
+   - Webhook URL: The URL from deployment output
+   - Webhook headers:
+     - Header name: `x-notion-webhook-secret`
+     - Header value: Your generated WebhookSecret
+3. Click "Save"
 
-### 問題5: QuickSightダッシュボードがNotionに埋め込めない
+#### Verify
 
-**症状**: Notionの埋め込みブロックでQuickSightが表示されない
+After performing an action in Notion (e.g., creating a page):
 
-**原因**: QuickSightの埋め込み設定が不足している
-
-**対処法**:
-
-#### 方法1: 公開ダッシュボードを使用
-1. QuickSight → Dashboards → Share → Publish to web
-2. 公開URLを取得
-3. NotionのEmbedブロックに貼り付け
-
-#### 方法2: リンクとして共有
-1. QuickSightダッシュボードのURLをコピー
-2. Notionページに貼り付け
-3. リンクプレビューで表示
-
-#### 方法3: スクリーンショットを使用
-1. QuickSightでダッシュボードのスクリーンショットを撮影
-2. Notionページに画像として貼り付け
-3. 定期的に更新
+```bash
+aws s3 ls s3://notion-audit-logs-{AccountId}/audit-logs/flat/ --recursive
+```
 
 ---
 
-## 7. コスト見積もり
+### 5. S3 → Notion Import
 
-### Lambda
-- 無料枠: 100万リクエスト/月
-- 通常使用: ほぼ無料
+You can bulk import existing Audit Logs from S3 into the Notion database.
+The deduplication feature prevents the same event from being imported twice.
 
-### S3
-- ストレージ: $0.025/GB/月
-- 1日100イベント（各1KB）の場合: 月3MB = $0.0001/月
+#### Manual Execution
 
-### Athena
-- クエリ実行: $5/TB
-- 通常使用: 月$1以下
+```bash
+# Import all records
+aws lambda invoke --function-name notion-s3-to-notion-importer \
+  --payload '{}' --cli-binary-format raw-in-base64-out output.json
 
-### QuickSight
-- Standard Edition: $9/月/ユーザー
-- Enterprise Edition: $18/月/ユーザー
-- SPICE: 10GB無料、追加$0.25/GB/月
+# Test with 10 records
+aws lambda invoke --function-name notion-s3-to-notion-importer \
+  --payload '{"limit": 10}' --cli-binary-format raw-in-base64-out output.json
 
-**合計**: 月$10〜$20程度
+# Specific month only
+aws lambda invoke --function-name notion-s3-to-notion-importer \
+  --payload '{"prefix": "audit-logs/flat/2026/03/"}' --cli-binary-format raw-in-base64-out output.json
+```
+
+#### Enable Scheduled Execution
+
+Change `Enabled` to `true` in the `S3ToNotionImportFunction` section of template.yaml and redeploy to run automatically every 6 hours.
+
+```yaml
+Events:
+  ScheduledImport:
+    Type: Schedule
+    Properties:
+      Schedule: rate(6 hours)
+      Enabled: true   # ← Change from false to true
+```
+
+#### Immediate Execution on Page Publish
+
+When a page publish event (`page.published`, `page.created`, `page.content_updated.published`) is detected, the Webhook Lambda asynchronously triggers the importer Lambda. This behavior is enabled by default.
+
+#### Local Script Import
+
+You can also run the import from your local machine without Lambda:
+
+```bash
+python3 import_s3_to_notion.py \
+  --bucket 'notion-audit-logs-{AccountId}' \
+  --notion-api-key 'ntn_xxxxx' \
+  --database-id 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' \
+  --limit 10
+```
 
 ---
 
-## 8. 参考リンク
+### 6. Athena Setup (Optional)
 
-- [Notion API Documentation](https://developers.notion.com/)
-- [AWS SAM Documentation](https://docs.aws.amazon.com/serverless-application-model/)
-- [Athena JSON SerDe](https://docs.aws.amazon.com/athena/latest/ug/json-serde.html)
-- [QuickSight User Guide](https://docs.aws.amazon.com/quicksight/)
-- [QuickSight Embedding](https://docs.aws.amazon.com/quicksight/latest/user/embedding-dashboards.html)
+Set this up if you want to query S3 data with SQL.
+
+#### 6-1. Create a Query Results Bucket
+
+```bash
+aws s3 mb s3://aws-athena-query-results-{AccountId}-{Region}
+```
+
+#### 6-2. Configure Athena Console
+
+1. Open Athena in the AWS Console
+2. Settings → Manage → Set Query result location to the bucket above
+
+#### 6-3. Create Database and Table
+
+```sql
+CREATE DATABASE IF NOT EXISTS notion_audit_logs;
+```
+
+```sql
+CREATE EXTERNAL TABLE notion_audit_logs.events_flat (
+  event_id string,
+  event_timestamp string,
+  workspace_id string,
+  workspace_name string,
+  ip_address string,
+  platform string,
+  event_type string,
+  user_email string,
+  actor_id string,
+  actor_type string,
+  raw_event string
+)
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+LOCATION 's3://notion-audit-logs-{AccountId}/audit-logs/flat/';
+```
+
+Replace `{AccountId}` with your actual AWS account ID.
+
+#### 6-4. Verify
+
+```sql
+SELECT COUNT(*) FROM notion_audit_logs.events_flat;
+SELECT * FROM notion_audit_logs.events_flat LIMIT 10;
+```
 
 ---
 
-## 9. サポート
+### 7. Troubleshooting
 
-問題が解決しない場合:
-1. CloudWatch Logsでエラー詳細を確認
-2. Athenaのクエリ履歴を確認
-3. S3バケットのアクセス権限を確認
+#### Logs are not saved to S3
+
+- Verify the Webhook URL is correct
+- Verify the `x-notion-webhook-secret` header value matches the deployed Secret
+- Check Lambda logs: `aws logs tail /aws/lambda/notion-webhook-handler --follow`
+
+#### Data is not written to the Notion database
+
+- Verify `NotionApiKey` and `NotionDatabaseId` are correctly configured
+- Verify the Integration has access permission to the database
+- Check importer Lambda logs: `aws logs tail /aws/lambda/notion-s3-to-notion-importer --follow`
+
+#### Duplicate data appeared
+
+- The importer Lambda fetches existing event IDs from the Notion database for deduplication on each run
+- Rare duplicates may occur if the Webhook Lambda's real-time write and the importer Lambda run simultaneously
+- Sort by event ID in the Notion database and manually remove duplicates
+
+#### Notifications are not delivered
+
+- Verify `NotificationType` is correctly set
+- For email: Confirm you approved the SNS subscription confirmation email
+- For Slack: Verify the Incoming Webhook URL is valid

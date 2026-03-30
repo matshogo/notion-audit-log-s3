@@ -9,6 +9,48 @@ Parameters:
     NoEcho: true
     Default: ''
 
+  NotificationType:
+    Type: String
+    Description: 通知先の種類（none=無効, email=メール通知, slack=Slack通知）
+    Default: 'none'
+    AllowedValues:
+      - none
+      - email
+      - slack
+
+  NotificationEmail:
+    Type: String
+    Description: メール通知先アドレス（NotificationType=emailの場合に必要）
+    Default: ''
+
+  SlackWebhookUrl:
+    Type: String
+    Description: Slack Incoming Webhook URL（NotificationType=slackの場合に必要）
+    NoEcho: true
+    Default: ''
+
+  NotionApiKey:
+    Type: String
+    Description: Notion Internal Integration Token（Notionダッシュボード連携用）
+    NoEcho: true
+    Default: ''
+
+  NotionDatabaseId:
+    Type: String
+    Description: Audit logを書き込むNotionデータベースのID
+    Default: ''
+
+  ImportLogLevel:
+    Type: String
+    Description: Notionへの取り込み対象（all=全イベント, page_publish_only=ページ公開のみ）
+    Default: 'all'
+    AllowedValues:
+      - all
+      - page_publish_only
+
+Conditions:
+  EnableEmailNotification: !Equals [!Ref NotificationType, 'email']
+
 Resources:
   # S3バケット
   AuditLogBucket:
@@ -42,9 +84,23 @@ Resources:
         Variables:
           BUCKET_NAME: !Ref AuditLogBucket
           WEBHOOK_SECRET: !Ref WebhookSecret
+          NOTIFICATION_TYPE: !Ref NotificationType
+          SNS_TOPIC_ARN: !If [EnableEmailNotification, !Ref PagePublishNotificationTopic, '']
+          SLACK_WEBHOOK_URL: !Ref SlackWebhookUrl
+          NOTION_API_KEY: !Ref NotionApiKey
+          NOTION_DATABASE_ID: !Ref NotionDatabaseId
+          IMPORT_LOG_LEVEL: !Ref ImportLogLevel
+          IMPORT_FUNCTION_NAME: !Ref S3ToNotionImportFunction
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref AuditLogBucket
+        - LambdaInvokePolicy:
+            FunctionName: !Ref S3ToNotionImportFunction
+        - !If
+          - EnableEmailNotification
+          - SNSPublishMessagePolicy:
+              TopicName: !GetAtt PagePublishNotificationTopic.TopicName
+          - !Ref 'AWS::NoValue'
       Events:
         WebhookApi:
           Type: Api
@@ -53,6 +109,33 @@ Resources:
             Method: post
             RestApiId: !Ref NotionWebhookApi
 
+  # S3→Notion一括インポート用Lambda
+  S3ToNotionImportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: notion-s3-to-notion-importer
+      CodeUri: lambda/
+      Handler: importer.lambda_handler
+      Runtime: python3.9
+      Timeout: 900
+      MemorySize: 256
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref AuditLogBucket
+          NOTION_API_KEY: !Ref NotionApiKey
+          NOTION_DATABASE_ID: !Ref NotionDatabaseId
+          IMPORT_LOG_LEVEL: !Ref ImportLogLevel
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref AuditLogBucket
+      Events:
+        ScheduledImport:
+          Type: Schedule
+          Properties:
+            Schedule: rate(6 hours)
+            Description: 6時間ごとにS3→Notionインポートを実行
+            Enabled: false
+
   # API Gateway
   NotionWebhookApi:
     Type: AWS::Serverless::Api
@@ -60,6 +143,21 @@ Resources:
       StageName: prod
       EndpointConfiguration:
         Type: REGIONAL
+
+  # SNSトピック（メール通知用）
+  PagePublishNotificationTopic:
+    Type: AWS::SNS::Topic
+    Condition: EnableEmailNotification
+    Properties:
+      TopicName: notion-page-publish-notification
+
+  PagePublishEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: EnableEmailNotification
+    Properties:
+      TopicArn: !Ref PagePublishNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
 
 Outputs:
   WebhookUrl:
@@ -73,3 +171,7 @@ Outputs:
   FunctionName:
     Description: Lambda関数名
     Value: !Ref NotionWebhookFunction
+  
+  ImportFunctionName:
+    Description: S3→Notionインポート用Lambda関数名
+    Value: !Ref S3ToNotionImportFunction
