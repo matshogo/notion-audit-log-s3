@@ -1,0 +1,69 @@
+name: X Hashtag Trend Analysis
+
+on:
+  # iPhone (iOS ショートカット) や GitHub モバイルアプリからトリガー可能
+  workflow_dispatch:
+    inputs:
+      hashtag:
+        description: '分析するハッシュタグ (例: AI, Python, 生成AI)'
+        required: true
+        type: string
+      max_tweets:
+        description: '取得する最大ツイート数'
+        required: false
+        default: '300'
+        type: string
+      skip_notion:
+        description: 'Notion への保存をスキップする'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  analyze:
+    name: "Analyze #${{ github.event.inputs.hashtag }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run trend analysis
+        env:
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          NOTION_API_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          HASHTAG="${{ github.event.inputs.hashtag }}"
+          MAX_TWEETS="${{ github.event.inputs.max_tweets }}"
+          SKIP_NOTION="${{ github.event.inputs.skip_notion }}"
+
+          ARGS="$HASHTAG --max-tweets $MAX_TWEETS --save-tweets"
+          if [ "$SKIP_NOTION" = "true" ]; then
+            ARGS="$ARGS --no-notion"
+          fi
+
+          python -m x_hashtag_trend.main $ARGS | tee analysis_report.txt
+
+      - name: Upload analysis report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "trend-report-${{ github.event.inputs.hashtag }}-${{ github.run_id }}"
+          path: |
+            analysis_report.txt
+            data/
+          retention-days: 30
+
+      - name: Post summary to GitHub Actions
+        if: always()
+        run: |
+          echo "## #${{ github.event.inputs.hashtag }} トレンド分析完了" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          head -30 analysis_report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
