@@ -31,3 +31,6 @@ secrets/
 
 # Logs
 *.log
+
+# Tweet data cache
+data/
