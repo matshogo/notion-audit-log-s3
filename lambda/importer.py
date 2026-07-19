@@ -23,14 +23,15 @@ s3_client = boto3.client('s3')
 BUCKET_NAME = os.environ['BUCKET_NAME']
 NOTION_API_KEY = os.environ.get('NOTION_API_KEY', '')
 NOTION_DATABASE_ID = os.environ.get('NOTION_DATABASE_ID', '')
-IMPORT_LOG_LEVEL = os.environ.get('IMPORT_LOG_LEVEL', 'all')
+IMPORT_LOG_LEVEL = os.environ.get('IMPORT_LOG_LEVEL', 'page_publish_only')
 NOTION_API_BASE = 'https://api.notion.com/v1'
 NOTION_VERSION = '2022-06-28'
 REQUEST_INTERVAL = 0.35
 
+# page.created は含めない: integration自身のNotion書き込みでも発火するため
+# （handler.py の自己イベント除外と合わせた無限ループ対策）
 PAGE_PUBLISH_EVENT_TYPES = {
     'page.published',
-    'page.created',
     'page.content_updated.published',
 }
 

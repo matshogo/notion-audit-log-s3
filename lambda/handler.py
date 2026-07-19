@@ -18,14 +18,53 @@ SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL', '')
 NOTION_API_KEY = os.environ.get('NOTION_API_KEY', '')
 NOTION_DATABASE_ID = os.environ.get('NOTION_DATABASE_ID', '')
 IMPORT_FUNCTION_NAME = os.environ.get('IMPORT_FUNCTION_NAME', '')
-IMPORT_LOG_LEVEL = os.environ.get('IMPORT_LOG_LEVEL', 'all')
+IMPORT_LOG_LEVEL = os.environ.get('IMPORT_LOG_LEVEL', 'page_publish_only')
 
 # 通知対象のイベントタイプ
+# page.created は含めない: このLambda自身のNotion書き込みでも発火し、
+# 通知・インポートLambdaの無限連鎖を引き起こすため（2026-07 コスト暴走の原因）
 PAGE_PUBLISH_EVENT_TYPES = {
     'page.published',
-    'page.created',
     'page.content_updated.published',
 }
+
+# 自己イベント除外用のactor ID（カンマ区切りで追加指定可能）
+SELF_ACTOR_IDS = {x.strip() for x in os.environ.get('SELF_ACTOR_IDS', '').split(',') if x.strip()}
+
+_self_actor_ids_cache = None
+
+
+def get_self_actor_ids() -> set:
+    """
+    このintegration自身のactor IDの集合を返す
+
+    SELF_ACTOR_IDS環境変数の値に加え、NOTION_API_KEYがあれば
+    Notion APIから自身のbot IDを自動取得する（コンテナ単位でキャッシュ）
+    """
+    global _self_actor_ids_cache
+    if _self_actor_ids_cache is not None:
+        return _self_actor_ids_cache
+
+    ids = set(SELF_ACTOR_IDS)
+    if NOTION_API_KEY:
+        try:
+            req = Request(
+                'https://api.notion.com/v1/users/me',
+                headers={
+                    'Authorization': f'Bearer {NOTION_API_KEY}',
+                    'Notion-Version': '2022-06-28',
+                },
+            )
+            me = json.loads(urlopen(req, timeout=5).read().decode('utf-8'))
+            if me.get('id'):
+                ids.add(me['id'])
+        except (URLError, Exception) as e:
+            print(f"Self actor ID lookup error: {str(e)}")
+            # 取得失敗時はキャッシュせず次回リトライ
+            return ids
+
+    _self_actor_ids_cache = ids
+    return ids
 
 
 def flatten_event(audit_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -227,15 +266,21 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         )
         
         print(f"Successfully saved audit log to s3://{BUCKET_NAME}/{s3_key_flat}")
-        
-        # ページ公開イベントの場合は通知を送信
-        send_notification(flattened_data)
-        
-        # Notionデータベースに書き込み（ダッシュボード用）
-        write_to_notion_db(flattened_data)
-        
-        # ページ公開イベントの場合はインポートLambdaを即時実行
-        trigger_import(flattened_data)
+
+        # 自己イベント（このintegration自身のNotion書き込みが生んだ監査イベント）は
+        # S3への保存のみ行い、通知・Notion書き込み・インポート起動はスキップする
+        # （自分の書き込み→新たな監査イベント→webhook…の無限ループを断つ）
+        if flattened_data.get('actor_id') in get_self_actor_ids():
+            print(f"Self-generated event, skipping downstream actions: {flattened_data.get('event_id')}")
+        else:
+            # ページ公開イベントの場合は通知を送信
+            send_notification(flattened_data)
+
+            # Notionデータベースに書き込み（ダッシュボード用）
+            write_to_notion_db(flattened_data)
+
+            # ページ公開イベントの場合はインポートLambdaを即時実行
+            trigger_import(flattened_data)
         
         return {
             'statusCode': 200,

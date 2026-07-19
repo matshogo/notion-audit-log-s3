@@ -42,11 +42,16 @@ Parameters:
 
   ImportLogLevel:
     Type: String
-    Description: Notionへの取り込み対象（all=全イベント, page_publish_only=ページ公開のみ）
-    Default: 'all'
+    Description: Notionへの取り込み対象（all=全イベント, page_publish_only=ページ公開のみ）。all は自己イベントループでコストが暴走しやすいため非推奨
+    Default: 'page_publish_only'
     AllowedValues:
       - all
       - page_publish_only
+
+  SelfActorIds:
+    Type: String
+    Description: 自己イベント除外に使うactor ID（カンマ区切り）。通常は空でよく、NotionApiKeyから自身のbot IDが自動検出される
+    Default: ''
 
 Conditions:
   EnableEmailNotification: !Equals [!Ref NotificationType, 'email']
@@ -91,6 +96,7 @@ Resources:
           NOTION_DATABASE_ID: !Ref NotionDatabaseId
           IMPORT_LOG_LEVEL: !Ref ImportLogLevel
           IMPORT_FUNCTION_NAME: !Ref S3ToNotionImportFunction
+          SELF_ACTOR_IDS: !Ref SelfActorIds
       Policies:
         - S3CrudPolicy:
             BucketName: !Ref AuditLogBucket
