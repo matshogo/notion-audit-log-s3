@@ -6,55 +6,97 @@ from typing import Dict, Any
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 
-s3_client = boto3.client('s3')
-sns_client = boto3.client('sns')
-lambda_client = boto3.client('lambda')
+s3_client = boto3.client("s3")
+sns_client = boto3.client("sns")
+lambda_client = boto3.client("lambda")
 
-BUCKET_NAME = os.environ['BUCKET_NAME']
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET', '')
-NOTIFICATION_TYPE = os.environ.get('NOTIFICATION_TYPE', 'none')
-SNS_TOPIC_ARN = os.environ.get('SNS_TOPIC_ARN', '')
-SLACK_WEBHOOK_URL = os.environ.get('SLACK_WEBHOOK_URL', '')
-NOTION_API_KEY = os.environ.get('NOTION_API_KEY', '')
-NOTION_DATABASE_ID = os.environ.get('NOTION_DATABASE_ID', '')
-IMPORT_FUNCTION_NAME = os.environ.get('IMPORT_FUNCTION_NAME', '')
-IMPORT_LOG_LEVEL = os.environ.get('IMPORT_LOG_LEVEL', 'all')
+BUCKET_NAME = os.environ["BUCKET_NAME"]
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+NOTIFICATION_TYPE = os.environ.get("NOTIFICATION_TYPE", "none")
+SNS_TOPIC_ARN = os.environ.get("SNS_TOPIC_ARN", "")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+NOTION_API_KEY = os.environ.get("NOTION_API_KEY", "")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "")
+IMPORT_FUNCTION_NAME = os.environ.get("IMPORT_FUNCTION_NAME", "")
+IMPORT_LOG_LEVEL = os.environ.get("IMPORT_LOG_LEVEL", "page_publish_only")
 
 # 通知対象のイベントタイプ
+# page.created は含めない: このLambda自身のNotion書き込みでも発火し、
+# 通知・インポートLambdaの無限連鎖を引き起こすため（2026-07 コスト暴走の原因）
 PAGE_PUBLISH_EVENT_TYPES = {
-    'page.published',
-    'page.created',
-    'page.content_updated.published',
+    "page.published",
+    "page.content_updated.published",
 }
+
+# 自己イベント除外用のactor ID（カンマ区切りで追加指定可能）
+SELF_ACTOR_IDS = {
+    x.strip() for x in os.environ.get("SELF_ACTOR_IDS", "").split(",") if x.strip()
+}
+
+_self_actor_ids_cache = None
+
+
+def get_self_actor_ids() -> set:
+    """
+    このintegration自身のactor IDの集合を返す
+
+    SELF_ACTOR_IDS環境変数の値に加え、NOTION_API_KEYがあれば
+    Notion APIから自身のbot IDを自動取得する（コンテナ単位でキャッシュ）
+    """
+    global _self_actor_ids_cache
+    if _self_actor_ids_cache is not None:
+        return _self_actor_ids_cache
+
+    ids = set(SELF_ACTOR_IDS)
+    if NOTION_API_KEY:
+        try:
+            req = Request(
+                "https://api.notion.com/v1/users/me",
+                headers={
+                    "Authorization": f"Bearer {NOTION_API_KEY}",
+                    "Notion-Version": "2022-06-28",
+                },
+            )
+            resp = urlopen(req, timeout=5)  # nosec B310
+            me = json.loads(resp.read().decode("utf-8"))
+            if me.get("id"):
+                ids.add(me["id"])
+        except (URLError, Exception) as e:
+            print(f"Self actor ID lookup error: {str(e)}")
+            # 取得失敗時はキャッシュせず次回リトライ
+            return ids
+
+    _self_actor_ids_cache = ids
+    return ids
 
 
 def flatten_event(audit_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     NotionのイベントデータをAthena/QuickSight用に平坦化
     """
-    event = audit_data.get('event', {})
-    
+    event = audit_data.get("event", {})
+
     # 基本フィールド
     flattened = {
-        'event_id': event.get('id'),
-        'event_timestamp': event.get('timestamp'),
-        'workspace_id': event.get('workspace_id'),
-        'workspace_name': event.get('workspace_name'),
-        'ip_address': event.get('ip_address'),
-        'platform': event.get('platform'),
-        'event_type': event.get('type'),
+        "event_id": event.get("id"),
+        "event_timestamp": event.get("timestamp"),
+        "workspace_id": event.get("workspace_id"),
+        "workspace_name": event.get("workspace_name"),
+        "ip_address": event.get("ip_address"),
+        "platform": event.get("platform"),
+        "event_type": event.get("type"),
     }
-    
+
     # アクター情報
-    actor = event.get('actor', {})
-    person = actor.get('person', {})
-    flattened['user_email'] = person.get('email')
-    flattened['actor_id'] = actor.get('id')
-    flattened['actor_type'] = actor.get('type')
-    
+    actor = event.get("actor", {})
+    person = actor.get("person", {})
+    flattened["user_email"] = person.get("email")
+    flattened["actor_id"] = actor.get("id")
+    flattened["actor_type"] = actor.get("type")
+
     # 元のJSONも保存（詳細分析用）
-    flattened['raw_event'] = json.dumps(event, ensure_ascii=False)
-    
+    flattened["raw_event"] = json.dumps(event, ensure_ascii=False)
+
     return flattened
 
 
@@ -62,15 +104,15 @@ def send_notification(flattened_data: Dict[str, Any]) -> None:
     """
     ページ公開イベントの通知を送信する
     """
-    event_type = flattened_data.get('event_type', '')
+    event_type = flattened_data.get("event_type", "")
     if event_type not in PAGE_PUBLISH_EVENT_TYPES:
         return
-    if NOTIFICATION_TYPE == 'none':
+    if NOTIFICATION_TYPE == "none":
         return
 
-    user = flattened_data.get('user_email', '不明')
-    workspace = flattened_data.get('workspace_name', '不明')
-    timestamp = flattened_data.get('event_timestamp', '')
+    user = flattened_data.get("user_email", "不明")
+    workspace = flattened_data.get("workspace_name", "不明")
+    timestamp = flattened_data.get("event_timestamp", "")
     subject = f"[Notion] ページが公開されました ({event_type})"
     message = (
         f"イベント: {event_type}\n"
@@ -80,7 +122,7 @@ def send_notification(flattened_data: Dict[str, Any]) -> None:
     )
 
     try:
-        if NOTIFICATION_TYPE == 'email' and SNS_TOPIC_ARN:
+        if NOTIFICATION_TYPE == "email" and SNS_TOPIC_ARN:
             sns_client.publish(
                 TopicArn=SNS_TOPIC_ARN,
                 Subject=subject,
@@ -88,16 +130,19 @@ def send_notification(flattened_data: Dict[str, Any]) -> None:
             )
             print(f"Email notification sent for {event_type}")
 
-        elif NOTIFICATION_TYPE == 'slack' and SLACK_WEBHOOK_URL:
-            payload = json.dumps({
-                'text': f":mega: *{subject}*\n{message}"
-            }).encode('utf-8')
+        elif NOTIFICATION_TYPE == "slack" and SLACK_WEBHOOK_URL:
+            if not SLACK_WEBHOOK_URL.startswith("https://"):
+                print("Slack webhook URL must be https, skipping notification")
+                return
+            payload = json.dumps({"text": f":mega: *{subject}*\n{message}"}).encode(
+                "utf-8"
+            )
             req = Request(
                 SLACK_WEBHOOK_URL,
                 data=payload,
-                headers={'Content-Type': 'application/json'},
+                headers={"Content-Type": "application/json"},
             )
-            urlopen(req, timeout=5)
+            urlopen(req, timeout=5)  # nosec B310
             print(f"Slack notification sent for {event_type}")
 
     except (URLError, Exception) as e:
@@ -113,41 +158,62 @@ def write_to_notion_db(flattened_data: Dict[str, Any]) -> None:
         return
 
     # ログレベルフィルタ
-    if IMPORT_LOG_LEVEL == 'page_publish_only':
-        event_type = flattened_data.get('event_type', '')
+    if IMPORT_LOG_LEVEL == "page_publish_only":
+        event_type = flattened_data.get("event_type", "")
         if event_type not in PAGE_PUBLISH_EVENT_TYPES:
             return
 
     properties = {
-        'イベントID': {'title': [{'text': {'content': flattened_data.get('event_id', '') or ''}}]},
-        'イベントタイプ': {'select': {'name': flattened_data.get('event_type', 'unknown') or 'unknown'}},
-        'ユーザー': {'email': flattened_data.get('user_email', '')} if flattened_data.get('user_email') else {'rich_text': [{'text': {'content': '不明'}}]},
-        'ワークスペース': {'rich_text': [{'text': {'content': flattened_data.get('workspace_name', '') or ''}}]},
-        'プラットフォーム': {'select': {'name': flattened_data.get('platform', 'unknown') or 'unknown'}},
-        'IPアドレス': {'rich_text': [{'text': {'content': flattened_data.get('ip_address', '') or ''}}]},
+        "イベントID": {
+            "title": [{"text": {"content": flattened_data.get("event_id", "") or ""}}]
+        },
+        "イベントタイプ": {
+            "select": {"name": flattened_data.get("event_type", "unknown") or "unknown"}
+        },
+        "ユーザー": (
+            {"email": flattened_data.get("user_email", "")}
+            if flattened_data.get("user_email")
+            else {"rich_text": [{"text": {"content": "不明"}}]}
+        ),
+        "ワークスペース": {
+            "rich_text": [
+                {"text": {"content": flattened_data.get("workspace_name", "") or ""}}
+            ]
+        },
+        "プラットフォーム": {
+            "select": {"name": flattened_data.get("platform", "unknown") or "unknown"}
+        },
+        "IPアドレス": {
+            "rich_text": [
+                {"text": {"content": flattened_data.get("ip_address", "") or ""}}
+            ]
+        },
     }
 
     # タイムスタンプがあればdate型で設定
-    event_ts = flattened_data.get('event_timestamp')
+    event_ts = flattened_data.get("event_timestamp")
     if event_ts:
-        properties['日時'] = {'date': {'start': event_ts}}
+        properties["日時"] = {"date": {"start": event_ts}}
 
-    payload = json.dumps({
-        'parent': {'database_id': NOTION_DATABASE_ID},
-        'properties': properties,
-    }, ensure_ascii=False).encode('utf-8')
+    payload = json.dumps(
+        {
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": properties,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
 
     try:
         req = Request(
-            'https://api.notion.com/v1/pages',
+            "https://api.notion.com/v1/pages",
             data=payload,
             headers={
-                'Authorization': f'Bearer {NOTION_API_KEY}',
-                'Content-Type': 'application/json',
-                'Notion-Version': '2022-06-28',
+                "Authorization": f"Bearer {NOTION_API_KEY}",
+                "Content-Type": "application/json",
+                "Notion-Version": "2022-06-28",
             },
         )
-        urlopen(req, timeout=10)
+        urlopen(req, timeout=10)  # nosec B310
         print(f"Written to Notion DB: {flattened_data.get('event_id')}")
     except (URLError, Exception) as e:
         # Notion書き込み失敗はログに残すが、メイン処理は止めない
@@ -158,7 +224,7 @@ def trigger_import(flattened_data: Dict[str, Any]) -> None:
     """
     ページ公開イベント時にインポートLambdaを非同期で即時実行する
     """
-    event_type = flattened_data.get('event_type', '')
+    event_type = flattened_data.get("event_type", "")
     if event_type not in PAGE_PUBLISH_EVENT_TYPES:
         return
     if not IMPORT_FUNCTION_NAME:
@@ -167,8 +233,8 @@ def trigger_import(flattened_data: Dict[str, Any]) -> None:
     try:
         lambda_client.invoke(
             FunctionName=IMPORT_FUNCTION_NAME,
-            InvocationType='Event',  # 非同期呼び出し
-            Payload=json.dumps({'trigger': 'page_publish', 'event_type': event_type}),
+            InvocationType="Event",  # 非同期呼び出し
+            Payload=json.dumps({"trigger": "page_publish", "event_type": event_type}),
         )
         print(f"Triggered import Lambda for {event_type}")
     except Exception as e:
@@ -182,80 +248,87 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         # Webhook認証チェック
         if WEBHOOK_SECRET:
-            headers = event.get('headers', {})
+            headers = event.get("headers", {})
             # ヘッダー名は小文字に正規化される
-            auth_header = headers.get('x-notion-webhook-secret', '')
+            auth_header = headers.get("x-notion-webhook-secret", "")
             if auth_header != WEBHOOK_SECRET:
                 return {
-                    'statusCode': 401,
-                    'body': json.dumps({'error': 'Unauthorized'})
+                    "statusCode": 401,
+                    "body": json.dumps({"error": "Unauthorized"}),
                 }
-        
+
         # リクエストボディの取得
-        body = event.get('body', '{}')
+        body = event.get("body", "{}")
         if isinstance(body, str):
             audit_data = json.loads(body)
         else:
             audit_data = body
-        
+
         # タイムスタンプ生成
         timestamp = datetime.utcnow()
-        date_prefix = timestamp.strftime('%Y/%m/%d')
+        date_prefix = timestamp.strftime("%Y/%m/%d")
         filename = f"{timestamp.strftime('%Y%m%d_%H%M%S_%f')}.json"
-        
+
         # データを平坦化
         flattened_data = flatten_event(audit_data)
-        
+
         # S3キーの生成（元のJSONと平坦化版の両方を保存）
         s3_key_original = f"audit-logs/original/{date_prefix}/{filename}"
         s3_key_flat = f"audit-logs/flat/{date_prefix}/{filename}"
-        
+
         # 元のJSONを保存
         s3_client.put_object(
             Bucket=BUCKET_NAME,
             Key=s3_key_original,
             Body=json.dumps(audit_data, ensure_ascii=False, indent=2),
-            ContentType='application/json'
+            ContentType="application/json",
         )
-        
+
         # 平坦化したJSONを保存（1行JSON形式）
         s3_client.put_object(
             Bucket=BUCKET_NAME,
             Key=s3_key_flat,
-            Body=json.dumps(flattened_data, ensure_ascii=False) + '\n',
-            ContentType='application/json'
+            Body=json.dumps(flattened_data, ensure_ascii=False) + "\n",
+            ContentType="application/json",
         )
-        
+
         print(f"Successfully saved audit log to s3://{BUCKET_NAME}/{s3_key_flat}")
-        
-        # ページ公開イベントの場合は通知を送信
-        send_notification(flattened_data)
-        
-        # Notionデータベースに書き込み（ダッシュボード用）
-        write_to_notion_db(flattened_data)
-        
-        # ページ公開イベントの場合はインポートLambdaを即時実行
-        trigger_import(flattened_data)
-        
+
+        # 自己イベント（このintegration自身のNotion書き込みが生んだ監査イベント）は
+        # S3への保存のみ行い、通知・Notion書き込み・インポート起動はスキップする
+        # （自分の書き込み→新たな監査イベント→webhook…の無限ループを断つ）
+        if flattened_data.get("actor_id") in get_self_actor_ids():
+            print(
+                f"Self-generated event, skipping downstream actions: {flattened_data.get('event_id')}"
+            )
+        else:
+            # ページ公開イベントの場合は通知を送信
+            send_notification(flattened_data)
+
+            # Notionデータベースに書き込み（ダッシュボード用）
+            write_to_notion_db(flattened_data)
+
+            # ページ公開イベントの場合はインポートLambdaを即時実行
+            trigger_import(flattened_data)
+
         return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': 'Audit log saved successfully',
-                's3_key_original': s3_key_original,
-                's3_key_flat': s3_key_flat
-            })
+            "statusCode": 200,
+            "body": json.dumps(
+                {
+                    "message": "Audit log saved successfully",
+                    "s3_key_original": s3_key_original,
+                    "s3_key_flat": s3_key_flat,
+                }
+            ),
         }
-        
+
     except json.JSONDecodeError as e:
         print(f"JSON decode error: {str(e)}")
-        return {
-            'statusCode': 400,
-            'body': json.dumps({'error': 'Invalid JSON'})
-        }
-    
+        return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON"})}
+
     except Exception as e:
         print(f"Error: {str(e)}")
         return {
-            'statusCode': 500,
-            'body': json.dumps({'error': 'Internal server error'})
+            "statusCode": 500,
+            "body": json.dumps({"error": "Internal server error"}),
         }

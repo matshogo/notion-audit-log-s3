@@ -29,7 +29,7 @@ SELECT * FROM notion_audit_logs.events_flat LIMIT 10;
 SELECT COUNT(*) FROM notion_audit_logs.events_flat;
 
 -- ステップ5: イベントタイプ別の集計
-SELECT event_type, COUNT(*) as count 
-FROM notion_audit_logs.events_flat 
-GROUP BY event_type 
+SELECT event_type, COUNT(*) as count
+FROM notion_audit_logs.events_flat
+GROUP BY event_type
 ORDER BY count DESC;

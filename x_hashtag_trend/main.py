@@ -26,19 +26,26 @@ def main():
     )
     parser.add_argument("hashtag", help="分析するハッシュタグ (例: AI, Python)")
     parser.add_argument(
-        "--max-tweets", type=int, default=300,
+        "--max-tweets",
+        type=int,
+        default=300,
         help="取得する最大ツイート数 (デフォルト: 300)",
     )
     parser.add_argument(
-        "--no-notion", action="store_true",
+        "--no-notion",
+        action="store_true",
         help="Notion への保存をスキップ（分析結果のみ出力）",
     )
     parser.add_argument(
-        "--output", "-o", type=str, default=None,
+        "--output",
+        "-o",
+        type=str,
+        default=None,
         help="分析結果 JSON の出力先ファイルパス",
     )
     parser.add_argument(
-        "--save-tweets", action="store_true",
+        "--save-tweets",
+        action="store_true",
         help="取得した生ツイートデータも JSON で保存する",
     )
 

@@ -19,11 +19,20 @@ def analyze_tweets(tweets: list[dict]) -> dict:
         - keyword_freq: 頻出キーワード
     """
     if not tweets:
-        return {"summary": {"total_tweets": 0}, "error": "ツイートが見つかりませんでした"}
+        return {
+            "summary": {"total_tweets": 0},
+            "error": "ツイートが見つかりませんでした",
+        }
 
     # --- 概要統計 ---
-    metrics_keys = ["retweet_count", "reply_count", "like_count", "quote_count",
-                    "impression_count", "bookmark_count"]
+    metrics_keys = [
+        "retweet_count",
+        "reply_count",
+        "like_count",
+        "quote_count",
+        "impression_count",
+        "bookmark_count",
+    ]
     total_metrics = {k: 0 for k in metrics_keys}
     for t in tweets:
         pm = t.get("public_metrics", {})
@@ -61,23 +70,27 @@ def analyze_tweets(tweets: list[dict]) -> dict:
     # --- エンゲージメント上位ツイート ---
     def engagement_score(t):
         pm = t.get("public_metrics", {})
-        return (pm.get("like_count", 0) * 1
-                + pm.get("retweet_count", 0) * 2
-                + pm.get("reply_count", 0) * 1.5
-                + pm.get("quote_count", 0) * 2)
+        return (
+            pm.get("like_count", 0) * 1
+            + pm.get("retweet_count", 0) * 2
+            + pm.get("reply_count", 0) * 1.5
+            + pm.get("quote_count", 0) * 2
+        )
 
     sorted_tweets = sorted(tweets, key=engagement_score, reverse=True)
     top_tweets = []
     for t in sorted_tweets[:10]:
         author = t.get("author", {})
-        top_tweets.append({
-            "text": t.get("text", ""),
-            "author_name": author.get("name", ""),
-            "author_username": author.get("username", ""),
-            "metrics": t.get("public_metrics", {}),
-            "created_at": t.get("created_at", ""),
-            "engagement_score": engagement_score(t),
-        })
+        top_tweets.append(
+            {
+                "text": t.get("text", ""),
+                "author_name": author.get("name", ""),
+                "author_username": author.get("username", ""),
+                "metrics": t.get("public_metrics", {}),
+                "created_at": t.get("created_at", ""),
+                "engagement_score": engagement_score(t),
+            }
+        )
 
     # --- 共起ハッシュタグ ---
     hashtag_counter = Counter()
@@ -87,8 +100,7 @@ def analyze_tweets(tweets: list[dict]) -> dict:
             hashtag_counter[tag.lower()] += 1
 
     co_hashtags = [
-        {"tag": tag, "count": count}
-        for tag, count in hashtag_counter.most_common(20)
+        {"tag": tag, "count": count} for tag, count in hashtag_counter.most_common(20)
     ]
 
     # --- 投稿数上位アカウント ---
@@ -112,10 +124,46 @@ def analyze_tweets(tweets: list[dict]) -> dict:
 
     # --- 頻出キーワード（簡易） ---
     stop_words = {
-        "の", "は", "が", "を", "に", "で", "と", "も", "な", "た", "だ", "です",
-        "ます", "する", "ない", "ある", "いる", "れる", "この", "その", "あの",
-        "して", "から", "まで", "より", "ため", "こと", "もの", "さん", "ちゃん",
-        "https", "http", "co", "RT", "the", "and", "for", "you", "that", "with",
+        "の",
+        "は",
+        "が",
+        "を",
+        "に",
+        "で",
+        "と",
+        "も",
+        "な",
+        "た",
+        "だ",
+        "です",
+        "ます",
+        "する",
+        "ない",
+        "ある",
+        "いる",
+        "れる",
+        "この",
+        "その",
+        "あの",
+        "して",
+        "から",
+        "まで",
+        "より",
+        "ため",
+        "こと",
+        "もの",
+        "さん",
+        "ちゃん",
+        "https",
+        "http",
+        "co",
+        "RT",
+        "the",
+        "and",
+        "for",
+        "you",
+        "that",
+        "with",
     }
     word_counter = Counter()
     for t in tweets:
@@ -125,14 +173,15 @@ def analyze_tweets(tweets: list[dict]) -> dict:
         # ハッシュタグ・メンションを除去
         text = re.sub(r"[#＃@]\w+", "", text)
         # 2文字以上のカタカナ・漢字・英単語を抽出
-        words = re.findall(r"[\u30A0-\u30FF]{2,}|[\u4E00-\u9FFF]{2,}|[a-zA-Z]{3,}", text)
+        words = re.findall(
+            r"[\u30A0-\u30FF]{2,}|[\u4E00-\u9FFF]{2,}|[a-zA-Z]{3,}", text
+        )
         for w in words:
             if w.lower() not in stop_words and len(w) >= 2:
                 word_counter[w.lower()] += 1
 
     keyword_freq = [
-        {"word": word, "count": count}
-        for word, count in word_counter.most_common(30)
+        {"word": word, "count": count} for word, count in word_counter.most_common(30)
     ]
 
     return {
@@ -200,10 +249,14 @@ def format_analysis_text(hashtag: str, analysis: dict) -> str:
         lines.append("--- エンゲージメント上位ツイート TOP5 ---")
         for i, t in enumerate(top[:5], 1):
             text_preview = t["text"][:100].replace("\n", " ")
-            lines.append(f"  {i}. @{t['author_username']} (score: {t['engagement_score']:.0f})")
+            lines.append(
+                f"  {i}. @{t['author_username']} (score: {t['engagement_score']:.0f})"
+            )
             lines.append(f"     {text_preview}...")
             m = t.get("metrics", {})
-            lines.append(f"     ♥{m.get('like_count',0)} 🔁{m.get('retweet_count',0)} 💬{m.get('reply_count',0)}")
+            lines.append(
+                f"     ♥{m.get('like_count',0)} 🔁{m.get('retweet_count',0)} 💬{m.get('reply_count',0)}"
+            )
         lines.append("")
 
     return "\n".join(lines)

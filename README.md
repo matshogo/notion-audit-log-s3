@@ -118,6 +118,25 @@ aws logs tail /aws/lambda/notion-webhook-handler --follow
 aws logs tail /aws/lambda/notion-s3-to-notion-importer --follow
 ```
 
+### 自己イベントループ対策
+
+このLambda自身がNotionに書き込むと、その書き込みが新たな監査イベントとしてwebhookに配信され、
+無限ループでLambda・S3・CloudWatchのコストが暴走する（2026-07に実際に発生）。以下の対策を実装済み:
+
+- **自己イベント除外**: actor IDがこのintegration自身（`/v1/users/me` から自動検出、`SelfActorIds` パラメータで追加指定可）のイベントは、S3への保存のみ行い、通知・Notion書き込み・インポート起動をスキップ
+- **`page.created` をトリガーから除外**: 自身のNotion書き込みでも発火するため、通知・即時インポートの対象は `page.published` / `page.content_updated.published` のみ
+- **`ImportLogLevel` の既定を `page_publish_only` に変更**: `all` はループ増幅の観点で非推奨
+
+ループで生成されたS3オブジェクトの削除とログ保持期間の設定は運用スクリプトで行う:
+
+```bash
+# dry-run（削除対象の件数・サイズを確認するだけ）
+python3 scripts/incident_cleanup.py
+
+# S3のループ生成オブジェクト削除（全バージョン+削除マーカー） + ログ保持1日設定
+python3 scripts/incident_cleanup.py --execute
+```
+
 ### セキュリティ
 
 - Webhook Secretによる認証
