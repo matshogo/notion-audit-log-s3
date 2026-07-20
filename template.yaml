@@ -169,15 +169,15 @@ Outputs:
   WebhookUrl:
     Description: NotionのWebhook URLとして設定するエンドポイント
     Value: !Sub 'https://${NotionWebhookApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook'
-  
+
   BucketName:
     Description: Audit logが保存されるS3バケット名
     Value: !Ref AuditLogBucket
-  
+
   FunctionName:
     Description: Lambda関数名
     Value: !Ref NotionWebhookFunction
-  
+
   ImportFunctionName:
     Description: S3→Notionインポート用Lambda関数名
     Value: !Ref S3ToNotionImportFunction

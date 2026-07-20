@@ -47,14 +47,19 @@ def fetch_recent_tweets(
     if next_token:
         params["next_token"] = next_token
 
-    url = f"https://api.x.com/2/tweets/search/recent?{urlencode(params, quote_via=quote)}"
-    req = Request(url, headers={
-        "Authorization": f"Bearer {get_bearer_token()}",
-        "User-Agent": "x-hashtag-trend-analyzer/1.0",
-    })
+    url = (
+        f"https://api.x.com/2/tweets/search/recent?{urlencode(params, quote_via=quote)}"
+    )
+    req = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {get_bearer_token()}",
+            "User-Agent": "x-hashtag-trend-analyzer/1.0",
+        },
+    )
 
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=30) as resp:  # nosec B310
             return json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
@@ -74,7 +79,9 @@ def fetch_all_tweets(hashtag: str, max_total: int = 500) -> list[dict]:
 
     while len(all_tweets) < max_total:
         batch_size = min(100, max_total - len(all_tweets))
-        data = fetch_recent_tweets(hashtag, max_results=batch_size, next_token=next_token)
+        data = fetch_recent_tweets(
+            hashtag, max_results=batch_size, next_token=next_token
+        )
 
         if "includes" in data and "users" in data["includes"]:
             for u in data["includes"]["users"]:

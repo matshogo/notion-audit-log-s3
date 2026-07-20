@@ -3,7 +3,7 @@
 -- ============================================
 
 -- 1. 基本的なイベント一覧
-SELECT 
+SELECT
   event.id,
   event.timestamp,
   event.type,
@@ -15,7 +15,7 @@ ORDER BY event.timestamp DESC
 LIMIT 100;
 
 -- 2. イベントタイプ別の集計
-SELECT 
+SELECT
   event.type,
   COUNT(*) as event_count
 FROM notion_audit_logs.events
@@ -23,7 +23,7 @@ GROUP BY event.type
 ORDER BY event_count DESC;
 
 -- 3. ユーザー別のアクティビティ
-SELECT 
+SELECT
   event.actor.person.email as user_email,
   COUNT(*) as action_count,
   COUNT(DISTINCT event.type) as unique_event_types
@@ -32,7 +32,7 @@ GROUP BY event.actor.person.email
 ORDER BY action_count DESC;
 
 -- 4. 日別のアクティビティ推移
-SELECT 
+SELECT
   DATE(from_iso8601_timestamp(event.timestamp)) as date,
   COUNT(*) as event_count
 FROM notion_audit_logs.events
@@ -40,7 +40,7 @@ GROUP BY DATE(from_iso8601_timestamp(event.timestamp))
 ORDER BY date DESC;
 
 -- 5. 時間帯別のアクティビティ
-SELECT 
+SELECT
   HOUR(from_iso8601_timestamp(event.timestamp)) as hour,
   COUNT(*) as event_count
 FROM notion_audit_logs.events
@@ -48,7 +48,7 @@ GROUP BY HOUR(from_iso8601_timestamp(event.timestamp))
 ORDER BY hour;
 
 -- 6. プラットフォーム別の利用状況
-SELECT 
+SELECT
   event.platform,
   COUNT(*) as usage_count
 FROM notion_audit_logs.events
@@ -56,7 +56,7 @@ GROUP BY event.platform
 ORDER BY usage_count DESC;
 
 -- 7. IPアドレス別のアクセス
-SELECT 
+SELECT
   event.ip_address,
   event.actor.person.email as user_email,
   COUNT(*) as access_count
@@ -65,7 +65,7 @@ GROUP BY event.ip_address, event.actor.person.email
 ORDER BY access_count DESC;
 
 -- 8. 最近7日間のアクティビティ
-SELECT 
+SELECT
   event.type,
   event.actor.person.email as user_email,
   event.timestamp
@@ -74,7 +74,7 @@ WHERE from_iso8601_timestamp(event.timestamp) >= current_timestamp - interval '7
 ORDER BY event.timestamp DESC;
 
 -- 9. ページ作成イベントの詳細
-SELECT 
+SELECT
   event.timestamp,
   event.actor.person.email as user_email,
   event."page.created".page_name,
@@ -84,11 +84,11 @@ WHERE event.type = 'page.created'
 ORDER BY event.timestamp DESC;
 
 -- 10. ユーザー追加/削除イベント
-SELECT 
+SELECT
   event.timestamp,
   event.type,
   event.actor.person.email as admin_email,
-  CASE 
+  CASE
     WHEN event.type = 'user.added' THEN event."user.added".target.user_id
     WHEN event.type = 'user.removed' THEN event."user.removed".target.user_id
   END as target_user_id

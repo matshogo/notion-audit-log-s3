@@ -14,7 +14,6 @@ import sys
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-
 NOTION_API_VERSION = "2022-06-28"
 
 
@@ -50,7 +49,7 @@ def create_database(token: str, parent_page_id: str) -> dict:
     )
 
     try:
-        with urlopen(req, timeout=30) as resp:
+        with urlopen(req, timeout=30) as resp:  # nosec B310
             return json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
@@ -60,15 +59,22 @@ def create_database(token: str, parent_page_id: str) -> dict:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python -m x_hashtag_trend.setup_notion_db <parent_page_id>", file=sys.stderr)
+        print(
+            "Usage: python -m x_hashtag_trend.setup_notion_db <parent_page_id>",
+            file=sys.stderr,
+        )
         print("", file=sys.stderr)
-        print("parent_page_id: データベースを作成する Notion ページの ID", file=sys.stderr)
+        print(
+            "parent_page_id: データベースを作成する Notion ページの ID", file=sys.stderr
+        )
         print("  ページ URL: https://www.notion.so/<page_id> から取得", file=sys.stderr)
         sys.exit(1)
 
     token = os.environ.get("NOTION_API_TOKEN")
     if not token:
-        print("エラー: 環境変数 NOTION_API_TOKEN が設定されていません。", file=sys.stderr)
+        print(
+            "エラー: 環境変数 NOTION_API_TOKEN が設定されていません。", file=sys.stderr
+        )
         sys.exit(1)
 
     parent_page_id = sys.argv[1]
